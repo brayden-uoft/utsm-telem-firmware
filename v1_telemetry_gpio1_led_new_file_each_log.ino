@@ -99,11 +99,18 @@ static const int SD_MOSI = 6;
 static const int SD_MISO = 5;
 static const int SD_SCK  = 4;
 
-static const char *SD_LOG_FILE = "/telemetry.csv";
+static const uint16_t SD_MAX_LOG_FILES = 999;
+char g_sdLogFile[32] = "/telemetry_001.csv";
+uint16_t g_sdLogIndex = 0;
 
 bool g_sdReady = false;
 
 uint32_t lastButtonHandledMs = 0;
+
+// Forward declarations for Arduino/C++ builds
+bool selectNextSDLogFile();
+void startLoggingNewFile(const char *reason);
+void updateLoggingLed();
 
 // =========================
 // Logged record
@@ -439,7 +446,7 @@ void printHelp()
 {
   Serial.println();
   Serial.println("Commands:");
-  Serial.println("  s = start logging");
+  Serial.println("  s = start logging with a new CSV file");
   Serial.println("  x = stop logging");
   Serial.println("  d = dump log as CSV");
   Serial.println("  e = erase log");
@@ -453,9 +460,11 @@ void handleSerialCommands()
     char c = Serial.read();
 
     if (c == 's') {
-      g_loggingEnabled = true;
-      updateLoggingLed();
-      Serial.println("Logging STARTED");
+      if (!g_loggingEnabled) {
+        startLoggingNewFile("Serial");
+      } else {
+        Serial.printf("Already logging to %s\n", g_sdReady ? g_sdLogFile : "NO_SD");
+      }
     } else if (c == 'x') {
       g_loggingEnabled = false;
       updateLoggingLed();
@@ -473,6 +482,72 @@ void handleSerialCommands()
     } else if (c == 'h') {
       printHelp();
     }
+  }
+}
+
+
+bool writeSDCsvHeader(const char *path)
+{
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    Serial.printf("Failed to create %s\n", path);
+    return false;
+  }
+
+  f.println("timestamp_ms,current_mA,voltage_mV,ax_x100,ay_x100,az_x100,amag_x100");
+  f.close();
+  return true;
+}
+
+bool selectNextSDLogFile()
+{
+  if (!g_sdReady) return false;
+
+  for (uint16_t i = 1; i <= SD_MAX_LOG_FILES; i++) {
+    snprintf(g_sdLogFile, sizeof(g_sdLogFile), "/telemetry_%03u.csv", i);
+
+    if (!SD.exists(g_sdLogFile)) {
+      g_sdLogIndex = i;
+
+      if (!writeSDCsvHeader(g_sdLogFile)) {
+        return false;
+      }
+
+      Serial.printf("New SD log file: %s\n", g_sdLogFile);
+      return true;
+    }
+  }
+
+  Serial.println("No free SD log filename left. Delete old telemetry_###.csv files or raise SD_MAX_LOG_FILES.");
+  return false;
+}
+
+void startLoggingNewFile(const char *reason)
+{
+  if (g_sdReady) {
+    if (!selectNextSDLogFile()) {
+      g_loggingEnabled = false;
+      updateLoggingLed();
+      Serial.println("Logging NOT started because no SD log file could be created");
+      return;
+    }
+  } else {
+    Serial.println("WARNING: SD not ready. Logging enabled, but SD writes will fail.");
+  }
+
+  g_loggingEnabled = true;
+  updateLoggingLed();
+
+  if (reason) {
+    Serial.printf("%s logging STARTED", reason);
+  } else {
+    Serial.print("Logging STARTED");
+  }
+
+  if (g_sdReady) {
+    Serial.printf(" -> %s\n", g_sdLogFile);
+  } else {
+    Serial.println();
   }
 }
 
@@ -502,20 +577,6 @@ bool initSDCard()
 
   Serial.printf("SD card size: %llu MB\n", SD.cardSize() / (1024 * 1024));
 
-  // Create CSV header if file does not exist
-  if (!SD.exists(SD_LOG_FILE)) {
-    File f = SD.open(SD_LOG_FILE, FILE_WRITE);
-    if (!f) {
-      Serial.println("Failed to create telemetry.csv");
-      return false;
-    }
-
-    f.println("timestamp_ms,current_mA,voltage_mV,ax_x100,ay_x100,az_x100,amag_x100");
-    f.close();
-
-    Serial.println("Created telemetry.csv with header");
-  }
-
   return true;
 }
 
@@ -523,7 +584,7 @@ bool appendRecordSD(const TelemetryRecord_t &rec)
 {
   if (!g_sdReady) return false;
 
-  File f = SD.open(SD_LOG_FILE, FILE_APPEND);
+  File f = SD.open(g_sdLogFile, FILE_APPEND);
   if (!f) {
     Serial.println("Failed to open SD log file");
     return false;
@@ -603,12 +664,10 @@ void setup()
   printHelp();
 
   // Auto-start logging after setup/calibration is complete.
-  g_loggingEnabled = true;
-  updateLoggingLed();
+  startLoggingNewFile("AUTO");
 
-  Serial.println("AUTO logging started on boot");
   Serial.println("LED ON = logging, LED OFF = not logging, LED blinking = startup/calibration");
-  Serial.println("Use 'x' to stop, 'd' to dump, 'e' to erase");
+  Serial.println("Use 'x' to stop, 's' to start a new CSV, 'd' to dump LittleFS, 'e' to erase LittleFS");
 }
 
 // =========================
@@ -629,13 +688,12 @@ void loop()
     if (now - lastButtonHandledMs > 250) {
       lastButtonHandledMs = now;
 
-      g_loggingEnabled = !g_loggingEnabled;
-      updateLoggingLed();
-
       if (g_loggingEnabled) {
-        Serial.println("Button: SD logging STARTED");
-      } else {
+        g_loggingEnabled = false;
+        updateLoggingLed();
         Serial.println("Button: SD logging STOPPED");
+      } else {
+        startLoggingNewFile("Button");
       }
     }
   }
@@ -697,7 +755,8 @@ void loop()
   
   if (appendRecordSD(rec)) {
     Serial.printf(
-      "SD LOG t=%lu ms I=%d mA V=%ld mV Ax=%d Ay=%d Az=%d Mag=%u raw=%d\n",
+      "SD LOG %s t=%lu ms I=%d mA V=%ld mV Ax=%d Ay=%d Az=%d Mag=%u raw=%d\n",
+      g_sdLogFile,
       (unsigned long)rec.timestamp_ms,
       rec.current_mA,
       (long)rec.voltage_mV,
