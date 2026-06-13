@@ -121,13 +121,8 @@ struct TelemetryRecord_t
 
 // SD Card interrupt
 void IRAM_ATTR buttonISR() {
-  // uint32_t now = millis();
-
-  // // crude debounce: ignore interrupts within 50 ms
-  // if (now - lastInterruptTimeMs > 50) {
-  //   buttonEvent = true;
-  //   lastInterruptTimeMs = now;
-  // }
+  // Keep the ISR tiny: just record that a falling edge happened.
+  // Debouncing is handled in the main loop.
   buttonEvent = true;
 }
 
@@ -629,19 +624,18 @@ void loop()
 
     uint32_t now = millis();
 
-    // debounce
-    if (now - lastButtonHandledMs > 200) {
+    // Debounce. Do NOT check digitalRead(BUTTON_PIN) here.
+    // The button may already be released by the time loop() gets here.
+    if (now - lastButtonHandledMs > 250) {
       lastButtonHandledMs = now;
 
-      if (digitalRead(BUTTON_PIN) == LOW) {
-        g_loggingEnabled = !g_loggingEnabled;
-        updateLoggingLed();
+      g_loggingEnabled = !g_loggingEnabled;
+      updateLoggingLed();
 
-        if (g_loggingEnabled) {
-          Serial.println("Button: SD logging STARTED");
-        } else {
-          Serial.println("Button: SD logging STOPPED");
-        }
+      if (g_loggingEnabled) {
+        Serial.println("Button: SD logging STARTED");
+      } else {
+        Serial.println("Button: SD logging STOPPED");
       }
     }
   }
